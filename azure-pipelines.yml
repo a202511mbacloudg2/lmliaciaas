@@ -57,29 +57,23 @@ stages:
     - task: AzureCLI@2
       displayName: 'Executar CustomScriptExtension'
       inputs:
-        azureSubscription: 'ar01com'  # 🔁 Substitua
-        scriptType: 'ps'
+        azureSubscription: 'ar01com'
+        scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          $vmName = '$(vmName)'
-          $resourceGroup = '$(resourceGroupName)'
-          $scriptUrl = '$(scriptUrl)'
-
-          # Define o conteúdo JSON como um objeto PowerShell
-          $settings = @{
-            fileUris = @($scriptUrl)
-            commandToExecute = "powershell -ExecutionPolicy Unrestricted -File site.ps1"
+          cat <<EOF > customScriptSettings.json
+          {
+            "fileUris": [
+              "$(scriptUrl)"
+            ],
+            "commandToExecute": "powershell -ExecutionPolicy Bypass -File site.ps1"
           }
+          EOF
 
-          # Converte para JSON válido e salva em um arquivo temporário no agente
-          $jsonFile = "customScriptSettings.json"
-          $settings | ConvertTo-Json -Depth 3 | Out-File -FilePath $jsonFile -Encoding ascii
-
-          # Executa a extensão passando o caminho do arquivo JSON
-          az vm extension set `
-            --resource-group $resourceGroup `
-            --vm-name $vmName `
-            --name CustomScriptExtension `
-            --publisher Microsoft.Compute `
-            --settings @$jsonFile # Usa @ para indicar que é um caminho de arquivo
+          az vm extension set \
+            --resource-group "$(resourceGroupName)" \
+            --vm-name "$(vmName)" \
+            --name CustomScriptExtension \
+            --publisher Microsoft.Compute \
+            --settings customScriptSettings.json
   # fim
