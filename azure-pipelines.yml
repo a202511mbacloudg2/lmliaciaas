@@ -2,131 +2,87 @@ trigger:
 - main
 
 pool:
-  name: agentPoolPucMinas
-  demands:
-    - Agent.Name -equals mac-agent-pucminas-01
+  name: 'agentPoolPucMinas'
 
 variables:
-  # ordem importa, o script tenta nessa sequência
-  candidateLocations: 'brazilsouth brazilseast eastus eastus2 southcentralus westus2'
-  vmSkuFallbacks: 'Standard_B1s Standard_B2s Standard_B2ms Standard_DS1_v2 Standard_D2s_v3 Standard_D2as_v5'
+  desiredLocation: 'eastus2'
+  resourceGroupName: 'rg-iac-web-iis-eastus2'
   vmName: 'vm-iac-web-iis'
-  indexUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/index.html'
   scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
 stages:
+# ======================================================
+# Stage 1: Provisionamento de Infraestrutura
+# ======================================================
 - stage: DeployInfra
   displayName: 'Provisionar Infraestrutura'
   jobs:
   - job: Deploy
     displayName: 'Criar RG e recursos ARM'
     steps:
+    - checkout: self
+      fetchDepth: 1
+
     - task: AzureCLI@2
-      displayName: 'Selecionar região e SKU disponíveis'
+      displayName: 'Garantir RG em eastus2'
       inputs:
         azureSubscription: 'ar01com'
-        scriptType: bash
-        scriptLocation: inlineScript
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
         inlineScript: |
-          set -e
+          RG="$(resourceGroupName)"
+          LOC="$(desiredLocation)"
 
-          echo "Regiões candidatas: $(candidateLocations)"
-          echo "SKUs candidatas: $(vmSkuFallbacks)"
+          if az group exists -n "$RG" | grep -q true; then
+            ACTUAL=$(az group show -n "$RG" --query location -o tsv)
+            echo "RG existe em: $ACTUAL"
+          else
+            echo "Criando RG '$RG' em '$LOC'"
+            az group create -n "$RG" -l "$LOC" -o none
+            ACTUAL="$LOC"
+          fi
 
-          chosenLoc=""
-          chosenSku=""
-
-          for loc in $(candidateLocations); do
-            echo "Testando região: $loc"
-
-            for sku in $(vmSkuFallbacks); do
-              echo "  Testando SKU: $sku em $loc"
-
-              restrictions=$(az vm list-skus \
-                --location "$loc" \
-                --resource-type virtualMachines \
-                --query "[?name=='$sku'] | [0].restrictions" -o json)
-
-              if [ "$restrictions" = "null" ] || [ "$restrictions" = "[]" ]; then
-                chosenLoc="$loc"
-                chosenSku="$sku"
-                echo "Encontrado: location=$chosenLoc, sku=$chosenSku"
-                break
-              fi
-            done
-
-            if [ -n "$chosenLoc" ]; then
-              break
-            fi
-          done
-
-          if [ -z "$chosenLoc" ] || [ -z "$chosenSku" ]; then
-            echo "Nenhuma combinação location+sku encontrada nas listas."
+          if [ "$ACTUAL" != "$LOC" ]; then
+            echo "ERRO: RG em '$ACTUAL'. A policy exige '$LOC'."
             exit 1
           fi
 
-          echo "##vso[task.setvariable variable=locationChosen]$chosenLoc"
-          echo "##vso[task.setvariable variable=vmSkuChosen]$chosenSku"
-
-          rg="rg-iac-web-iis-$chosenLoc"
-          echo "##vso[task.setvariable variable=resourceGroupNameChosen]$rg"
-          echo "RG escolhido: $rg"
-
-    - task: AzureCLI@2
-      displayName: 'Garantir Resource Group na região escolhida'
-      inputs:
-        azureSubscription: 'ar01com'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-
-          rg="$(resourceGroupNameChosen)"
-          loc="$(locationChosen)"
-
-          if az group show --name "$rg" >/dev/null 2>&1; then
-            rgLoc=$(az group show --name "$rg" --query location -o tsv)
-            echo "RG $rg já existe em: $rgLoc"
-            if [ "$rgLoc" != "$loc" ]; then
-              echo "Erro: RG $rg existe em $rgLoc, mas foi escolhido $loc."
-              exit 1
-            fi
-          else
-            az group create --name "$rg" --location "$loc"
-          fi
+          echo "##vso[task.setvariable variable=effectiveLocation]$ACTUAL"
 
     - task: AzureResourceManagerTemplateDeployment@3
-      displayName: 'Deploy ARM Template'
+      displayName: 'Implantar Modelo ARM'
       inputs:
         deploymentScope: 'Resource Group'
         azureResourceManagerConnection: 'ar01com'
         action: 'Create Or Update Resource Group'
-        resourceGroupName: '$(resourceGroupNameChosen)'
-        location: '$(locationChosen)'
+        resourceGroupName: '$(resourceGroupName)'
+        location: '$(effectiveLocation)'
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
-        overrideParameters: >
-          -vmSku "$(vmSkuChosen)"
-          -vmName "$(vmName)"
-          -location "$(locationChosen)"
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
+# ======================================================
+# Stage 2: Configurar IIS
+# ======================================================
 - stage: ConfigureWebsite
   displayName: 'Publicar site no IIS'
   dependsOn: DeployInfra
   condition: succeeded()
   jobs:
   - job: PublishHTML
-    displayName: 'Executar CustomScriptExtension para copiar index.html'
+    displayName: 'Custom Script Extension'
     steps:
+    - checkout: self
+      fetchDepth: 1
+
     - task: AzureCLI@2
       displayName: 'Executar CustomScriptExtension'
       inputs:
         azureSubscription: 'ar01com'
-        scriptType: bash
-        scriptLocation: inlineScript
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
         inlineScript: |
           cat <<EOF > customScriptSettings.json
           {
@@ -138,7 +94,7 @@ stages:
           EOF
 
           az vm extension set \
-            --resource-group "$(resourceGroupNameChosen)" \
+            --resource-group "$(resourceGroupName)" \
             --vm-name "$(vmName)" \
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
