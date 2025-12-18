@@ -8,7 +8,7 @@ pool:
 
 variables:
   location: 'brazilsouth'
-  resourceGroupName: 'rg-iac-web-iis'
+  resourceGroupName: 'rg-iac-web-iis-brs'
   vmName: 'vm-iac-web-iis'
   templateFile: 'vm-iis-template.json'
   parametersFile: 'vm-iis-parameters.json'
