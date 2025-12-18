@@ -11,11 +11,9 @@ pool:
 # Variáveis globais do pipeline
 variables:
   # Lista de regiões candidatas em ordem de prioridade
-  # Removido brazilseast pois não é região válida para Resource Group na sua assinatura
   candidateLocations: 'brazilsouth eastus2 eastus southcentralus westus2 westus3 centralus'
 
   # Lista de SKUs candidatas para tentar alocação de VM
-  # Inclui opções menores para aumentar chance em assinaturas com restrições e capacidade limitada
   vmSkuFallbacks: 'Standard_B1s Standard_B1ms Standard_B2s Standard_B2ms Standard_D2s_v3 Standard_D2as_v5 Standard_DS1_v2'
 
   # Nome base da VM que será criada pelo template ARM
@@ -37,8 +35,7 @@ stages:
 
     # ---------------------------------------------------------
     # Step 1: Seleciona região e SKU com base em validação real do ARM
-    # Objetivo: evitar falso positivo de disponibilidade, pois Capacity Restrictions
-    # pode aparecer apenas na validação ou no deploy, mesmo quando list-skus não acusa.
+    # Também cria o RG na região testada, sem abortar ao falhar em uma região específica
     # ---------------------------------------------------------
     - task: AzureCLI@2
       displayName: 'Selecionar região e SKU com validação real do ARM'
@@ -52,63 +49,48 @@ stages:
           echo "Regiões candidatas: $(candidateLocations)"
           echo "SKUs candidatas: $(vmSkuFallbacks)"
 
-          # Caminhos do template e parâmetros dentro do repositório
           templateFile="arm-templates/vm-iis-template.json"
           paramsFile="arm-templates/vm-iis-parameters.json"
 
-          # Variáveis para armazenar a escolha final
           chosenLoc=""
           chosenSku=""
           chosenRg=""
 
-          # Lista de regiões válidas para esta assinatura, evita erro ao tentar criar RG em região inválida
           validLocations=$(az account list-locations --query "[].name" -o tsv)
 
           is_valid_location () {
             echo "$validLocations" | tr '\t' '\n' | grep -qx "$1"
           }
 
-          # Loop por região
           for loc in $(candidateLocations); do
-
-            # Se a região não existir para esta assinatura, pula
             if ! is_valid_location "$loc"; then
               echo "Região inválida para esta assinatura: $loc, pulando."
               continue
             fi
 
-            # Nome do RG derivado da região para evitar conflito de localizações
             rg="rg-iac-web-iis-$loc"
             echo "Testando região: $loc, RG: $rg"
 
-            # Garante que o RG exista na região correta
             if az group show --name "$rg" >/dev/null 2>&1; then
               rgLoc=$(az group show --name "$rg" --query location -o tsv)
               echo "RG já existe em: $rgLoc"
-
-              # Se o RG existir em outra região, não dá para usar, então pula
               if [ "$rgLoc" != "$loc" ]; then
                 echo "RG $rg existe em $rgLoc, região testada é $loc, pulando esta região."
                 continue
               fi
             else
-              # Cria RG e, se falhar, não aborta o pipeline inteiro, apenas tenta próxima região
               set +e
               az group create --name "$rg" --location "$loc" >/dev/null 2>&1
               rc=$?
               set -e
-
               if [ $rc -ne 0 ]; then
                 echo "Falha ao criar RG em $loc, pulando para próxima região."
                 continue
               fi
             fi
 
-            # Loop por SKU, validando o template com overrideParameters
             for sku in $(vmSkuFallbacks); do
               echo "Validando template em $loc com SKU $sku"
-
-              # validate real, se passar aqui, a chance de falhar por capacidade cai bastante
               set +e
               az deployment group validate \
                 --resource-group "$rg" \
@@ -119,7 +101,6 @@ stages:
               rc=$?
               set -e
 
-              # Se a validação passou, escolhe esta combinação
               if [ $rc -eq 0 ]; then
                 chosenLoc="$loc"
                 chosenSku="$sku"
@@ -131,26 +112,23 @@ stages:
               fi
             done
 
-            # Se já escolheu, sai do loop de regiões
             if [ -n "$chosenLoc" ]; then
               break
             fi
           done
 
-          # Se não encontrou combinação válida, falha o pipeline
           if [ -z "$chosenLoc" ] || [ -z "$chosenSku" ] || [ -z "$chosenRg" ]; then
             echo "Nenhuma combinação válida de região e SKU foi encontrada."
             exit 1
           fi
 
-          # Exporta variáveis para os próximos steps do pipeline
           echo "##vso[task.setvariable variable=locationChosen]$chosenLoc"
           echo "##vso[task.setvariable variable=vmSkuChosen]$chosenSku"
           echo "##vso[task.setvariable variable=resourceGroupNameChosen]$chosenRg"
 
     # ---------------------------------------------------------
     # Step 2: Executa o deploy do ARM Template
-    # Usa as variáveis escolhidas no step anterior para evitar falhas por capacidade e região
+    # Usa as variáveis escolhidas no step anterior
     # ---------------------------------------------------------
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
@@ -163,13 +141,10 @@ stages:
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
-
-        # Sobrescreve parâmetros críticos
         overrideParameters: >
           -vmSku "$(vmSkuChosen)"
           -vmName "$(vmName)"
           -location "$(locationChosen)"
-
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
@@ -179,8 +154,6 @@ stages:
 - stage: ConfigureWebsite
   displayName: 'Publicar site no IIS'
   dependsOn: DeployInfra
-
-  # Só executa se o deploy de infraestrutura tiver sucesso
   condition: succeeded()
   jobs:
   - job: PublishHTML
@@ -188,8 +161,8 @@ stages:
     steps:
 
     # ---------------------------------------------------------
-    # Executa uma extensão na VM para rodar o script PowerShell
-    # O script deve estar acessível publicamente na URL informada
+    # Executa a extensão na VM para rodar o script PowerShell
+    # Ajuste crítico: usa env vars para evitar erro de bash ao interpretar $(variavel)
     # ---------------------------------------------------------
     - task: AzureCLI@2
       displayName: 'Executar CustomScriptExtension'
@@ -198,20 +171,28 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          # Gera o JSON de settings da extensão
+          set -e
+
+          echo "RG: $RG_NAME"
+          echo "VM: $VM_NAME"
+          echo "Script URL: $SCRIPT_URL"
+
           cat <<EOF > customScriptSettings.json
           {
             "fileUris": [
-              "$(scriptUrl)"
+              "$SCRIPT_URL"
             ],
             "commandToExecute": "powershell -ExecutionPolicy Bypass -File site.ps1"
           }
           EOF
 
-          # Aplica a extensão na VM no RG selecionado dinamicamente
           az vm extension set \
-            --resource-group "$(resourceGroupNameChosen)" \
-            --vm-name "$(vmName)" \
+            --resource-group "$RG_NAME" \
+            --vm-name "$VM_NAME" \
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
             --settings customScriptSettings.json
+      env:
+        RG_NAME: $(resourceGroupNameChosen)
+        VM_NAME: $(vmName)
+        SCRIPT_URL: $(scriptUrl)
