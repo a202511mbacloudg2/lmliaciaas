@@ -1,0 +1,5 @@
+{
+    "git.ignoreLimitWarning": true,
+    "totvsLanguageServer.welcomePage": false,
+    "totvsLanguageServer.editor.linter.includes": "/Volumes/TOTVS/PROTHEUS/Protheus/include"
+}
