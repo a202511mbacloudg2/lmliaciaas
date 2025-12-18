@@ -1,16 +1,13 @@
-
 {
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "resourceGroupName": {
-      "type": "string"
-    },
     "vmName": {
       "type": "string"
     },
     "location": {
-      "type": "string"
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
     },
     "adminUsername": {
       "type": "string"
@@ -19,11 +16,12 @@
       "type": "securestring"
     },
     "vmSku": {
-      "type": "string"
+      "type": "string",
+      "defaultValue": "Standard_DS1_v2"
     },
     "windowsOSVersion": {
       "type": "string",
-      "defaultValue": "2019-Datacenter"
+      "defaultValue": "2022-datacenter-azure-edition"
     },
     "publicIpSku": {
       "type": "string",
@@ -42,7 +40,7 @@
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2021-02-01",
       "name": "[variables('networkSecurityGroupName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "securityRules": [
           {
@@ -80,10 +78,12 @@
       "type": "Microsoft.Network/virtualNetworks",
       "apiVersion": "2021-02-01",
       "name": "[variables('vnetName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "addressSpace": {
-          "addressPrefixes": ["10.0.0.0/16"]
+          "addressPrefixes": [
+            "10.0.0.0/16"
+          ]
         },
         "subnets": [
           {
@@ -99,7 +99,7 @@
       "type": "Microsoft.Network/publicIPAddresses",
       "apiVersion": "2021-02-01",
       "name": "[variables('publicIpAddressName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "sku": {
         "name": "[parameters('publicIpSku')]"
       },
@@ -114,7 +114,7 @@
       "type": "Microsoft.Network/networkInterfaces",
       "apiVersion": "2021-02-01",
       "name": "[variables('networkInterfaceName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "dependsOn": [
         "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIpAddressName'))]",
         "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
@@ -144,7 +144,7 @@
       "type": "Microsoft.Compute/virtualMachines",
       "apiVersion": "2021-07-01",
       "name": "[parameters('vmName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "dependsOn": [
         "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
       ],
@@ -189,7 +189,7 @@
           "type": "Microsoft.Compute/virtualMachines/extensions",
           "apiVersion": "2021-07-01",
           "name": "[concat(parameters('vmName'), '/InstallIIS')]",
-          "location": "[parameters('location')]",
+          "location": "[resourceGroup().location]",
           "dependsOn": [
             "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
           ],
@@ -199,7 +199,7 @@
             "typeHandlerVersion": "1.9",
             "autoUpgradeMinorVersion": true,
             "settings": {
-              "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -Command \"Add-WindowsFeature Web-Server\""
+              "commandToExecute": "powershell -ExecutionPolicy Unrestricted -Command \"Add-WindowsFeature Web-Server\""
             }
           }
         }

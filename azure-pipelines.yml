@@ -29,7 +29,17 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          az group create --name "$(resourceGroupName)" --location "$(location)"
+          set -e
+          if az group show --name "$(resourceGroupName)" >/dev/null 2>&1; then
+            rgLoc=$(az group show --name "$(resourceGroupName)" --query location -o tsv)
+            echo "RG $(resourceGroupName) já existe em: $rgLoc"
+            if [ "$rgLoc" != "$(location)" ]; then
+              echo "Erro: RG existe em $rgLoc, mas pipeline está em $(location). Ajuste resourceGroupName ou location."
+              exit 1
+            fi
+          else
+            az group create --name "$(resourceGroupName)" --location "$(location)"
+          fi
 
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
@@ -48,6 +58,7 @@ stages:
 - stage: ConfigureWebsite
   displayName: 'Publicar site no IIS'
   dependsOn: DeployInfra
+  condition: succeeded()
   jobs:
   - job: PublishHTML
     displayName: 'Executar CustomScriptExtension para copiar index.html'

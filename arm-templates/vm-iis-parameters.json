@@ -1,27 +1,24 @@
 {
-    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-    "contentVersion": "1.0.0.0",
-    "parameters": {
-        "resourceGroupName": {
-            "value": "rg-iac-web-iis-brs"
-        },
-        "vmName": {
-            "value": "vm-iac-web-iis"
-        },
-        "location": {
-            "value": "brazilsouth"
-        },
-        "adminUsername": {
-            "value": "iacadmin"
-        },
-        "adminPassword": {
-            "value": "SuaSenhaSeguraAqui123!"
-        },
-        "vmSku": {
-            "value": "Standard_B2as_v2"
-        },
-        "windowsOSVersion": {
-            "value": "2022-datacenter-azure-edition"
-        }
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": {
+      "value": "vm-iac-web-iis"
+    },
+    "location": {
+      "value": "brazilsouth"
+    },
+    "adminUsername": {
+      "value": "iacadmin"
+    },
+    "adminPassword": {
+      "value": "SuaSenhaSeguraAqui123!"
+    },
+    "vmSku": {
+      "value": "Standard_DS1_v2"
+    },
+    "windowsOSVersion": {
+      "value": "2022-datacenter-azure-edition"
     }
+  }
 }
