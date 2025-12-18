@@ -2,87 +2,129 @@ trigger:
 - main
 
 pool:
-  name: 'agentPoolPucMinas'
+  name: agentPoolPucMinas
+  demands:
+    - Agent.Name -equals mac-agent-pucminas-01
 
 variables:
-  desiredLocation: 'eastus2'
-  resourceGroupName: 'rg-iac-web-iis-eastus2'
+  candidateLocations: 'brazilsouth brazilseast eastus eastus2 southcentralus westus2'
+  vmSkuFallbacks: 'Standard_B1s Standard_B2s Standard_B2ms Standard_DS1_v2 Standard_D2s_v3 Standard_D2as_v5'
   vmName: 'vm-iac-web-iis'
   scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
 stages:
-# ======================================================
-# Stage 1: Provisionamento de Infraestrutura
-# ======================================================
 - stage: DeployInfra
   displayName: 'Provisionar Infraestrutura'
   jobs:
   - job: Deploy
     displayName: 'Criar RG e recursos ARM'
     steps:
-    - checkout: self
-      fetchDepth: 1
 
     - task: AzureCLI@2
-      displayName: 'Garantir RG em eastus2'
+      displayName: 'Selecionar região e SKU com validação real do ARM'
       inputs:
         azureSubscription: 'ar01com'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
+        scriptType: bash
+        scriptLocation: inlineScript
         inlineScript: |
-          RG="$(resourceGroupName)"
-          LOC="$(desiredLocation)"
+          set -e
 
-          if az group exists -n "$RG" | grep -q true; then
-            ACTUAL=$(az group show -n "$RG" --query location -o tsv)
-            echo "RG existe em: $ACTUAL"
-          else
-            echo "Criando RG '$RG' em '$LOC'"
-            az group create -n "$RG" -l "$LOC" -o none
-            ACTUAL="$LOC"
-          fi
+          echo "Regiões candidatas: $(candidateLocations)"
+          echo "SKUs candidatas: $(vmSkuFallbacks)"
 
-          if [ "$ACTUAL" != "$LOC" ]; then
-            echo "ERRO: RG em '$ACTUAL'. A policy exige '$LOC'."
+          chosenLoc=""
+          chosenSku=""
+          chosenRg=""
+
+          templateFile="arm-templates/vm-iis-template.json"
+          paramsFile="arm-templates/vm-iis-parameters.json"
+
+          for loc in $(candidateLocations); do
+            rg="rg-iac-web-iis-$loc"
+
+            echo "Testando região: $loc, RG: $rg"
+
+            if az group show --name "$rg" >/dev/null 2>&1; then
+              rgLoc=$(az group show --name "$rg" --query location -o tsv)
+              echo "RG já existe em: $rgLoc"
+              if [ "$rgLoc" != "$loc" ]; then
+                echo "RG $rg existe em $rgLoc, região testada é $loc, pulando esta região."
+                continue
+              fi
+            else
+              az group create --name "$rg" --location "$loc" >/dev/null
+            fi
+
+            for sku in $(vmSkuFallbacks); do
+              echo "Validando template em $loc com SKU $sku"
+
+              set +e
+              az deployment group validate \
+                --resource-group "$rg" \
+                --template-file "$templateFile" \
+                --parameters "@$paramsFile" \
+                --parameters vmSku="$sku" vmName="$(vmName)" location="$loc" \
+                1>/dev/null 2>/dev/null
+              rc=$?
+              set -e
+
+              if [ $rc -eq 0 ]; then
+                chosenLoc="$loc"
+                chosenSku="$sku"
+                chosenRg="$rg"
+                echo "Validação OK, escolhidos: location=$chosenLoc, sku=$chosenSku, rg=$chosenRg"
+                break
+              else
+                echo "Validação falhou para $loc com $sku, tentando próxima SKU."
+              fi
+            done
+
+            if [ -n "$chosenLoc" ]; then
+              break
+            fi
+          done
+
+          if [ -z "$chosenLoc" ] || [ -z "$chosenSku" ] || [ -z "$chosenRg" ]; then
+            echo "Nenhuma combinação válida de região e SKU foi encontrada."
             exit 1
           fi
 
-          echo "##vso[task.setvariable variable=effectiveLocation]$ACTUAL"
+          echo "##vso[task.setvariable variable=locationChosen]$chosenLoc"
+          echo "##vso[task.setvariable variable=vmSkuChosen]$chosenSku"
+          echo "##vso[task.setvariable variable=resourceGroupNameChosen]$chosenRg"
 
     - task: AzureResourceManagerTemplateDeployment@3
-      displayName: 'Implantar Modelo ARM'
+      displayName: 'Deploy ARM Template'
       inputs:
         deploymentScope: 'Resource Group'
         azureResourceManagerConnection: 'ar01com'
         action: 'Create Or Update Resource Group'
-        resourceGroupName: '$(resourceGroupName)'
-        location: '$(effectiveLocation)'
+        resourceGroupName: '$(resourceGroupNameChosen)'
+        location: '$(locationChosen)'
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
+        overrideParameters: >
+          -vmSku "$(vmSkuChosen)"
+          -vmName "$(vmName)"
+          -location "$(locationChosen)"
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
-# ======================================================
-# Stage 2: Configurar IIS
-# ======================================================
 - stage: ConfigureWebsite
   displayName: 'Publicar site no IIS'
   dependsOn: DeployInfra
   condition: succeeded()
   jobs:
   - job: PublishHTML
-    displayName: 'Custom Script Extension'
+    displayName: 'Executar CustomScriptExtension para copiar index.html'
     steps:
-    - checkout: self
-      fetchDepth: 1
-
     - task: AzureCLI@2
       displayName: 'Executar CustomScriptExtension'
       inputs:
         azureSubscription: 'ar01com'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
+        scriptType: bash
+        scriptLocation: inlineScript
         inlineScript: |
           cat <<EOF > customScriptSettings.json
           {
@@ -94,7 +136,7 @@ stages:
           EOF
 
           az vm extension set \
-            --resource-group "$(resourceGroupName)" \
+            --resource-group "$(resourceGroupNameChosen)" \
             --vm-name "$(vmName)" \
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
