@@ -10,16 +10,16 @@ pool:
 
 # Variáveis globais do pipeline
 variables:
-  # Lista de regiões candidatas em ordem de prioridade
+  # Regiões candidatas em ordem de prioridade
   candidateLocations: 'brazilsouth eastus2 eastus southcentralus westus2 westus3 centralus'
 
-  # Lista de SKUs candidatas para tentar alocação de VM
+  # SKUs candidatas para tentar alocação de VM
   vmSkuFallbacks: 'Standard_B1s Standard_B1ms Standard_B2s Standard_B2ms Standard_D2s_v3 Standard_D2as_v5 Standard_DS1_v2'
 
-  # Nome base da VM que será criada pelo template ARM
+  # Nome da VM a ser criado pelo ARM
   vmName: 'vm-iac-web-iis'
 
-  # Script PowerShell hospedado no GitHub para ser executado dentro da VM Windows via Custom Script Extension
+  # Script PowerShell hospedado no GitHub para executar na VM via Custom Script Extension
   scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
 stages:
@@ -34,10 +34,11 @@ stages:
     steps:
 
     # ---------------------------------------------------------
-    # Step 1: Seleciona região e SKU com base em validação real do ARM
-    # Também cria o RG na região testada, sem abortar ao falhar em uma região específica
+    # Step 1: Seleciona região e SKU com validação real do ARM
+    # Publica variáveis como OUTPUT para serem consumidas no próximo stage
     # ---------------------------------------------------------
     - task: AzureCLI@2
+      name: pickRegionSku   # Nome do step, necessário para referenciar outputs no próximo stage
       displayName: 'Selecionar região e SKU com validação real do ARM'
       inputs:
         azureSubscription: 'ar01com'
@@ -75,7 +76,7 @@ stages:
               rgLoc=$(az group show --name "$rg" --query location -o tsv)
               echo "RG já existe em: $rgLoc"
               if [ "$rgLoc" != "$loc" ]; then
-                echo "RG $rg existe em $rgLoc, região testada é $loc, pulando esta região."
+                echo "RG $rg existe em $rgLoc, região testada é $loc, pulando."
                 continue
               fi
             else
@@ -84,13 +85,14 @@ stages:
               rc=$?
               set -e
               if [ $rc -ne 0 ]; then
-                echo "Falha ao criar RG em $loc, pulando para próxima região."
+                echo "Falha ao criar RG em $loc, pulando."
                 continue
               fi
             fi
 
             for sku in $(vmSkuFallbacks); do
               echo "Validando template em $loc com SKU $sku"
+
               set +e
               az deployment group validate \
                 --resource-group "$rg" \
@@ -107,8 +109,6 @@ stages:
                 chosenRg="$rg"
                 echo "Validação OK, escolhidos: location=$chosenLoc, sku=$chosenSku, rg=$chosenRg"
                 break
-              else
-                echo "Validação falhou para $loc com $sku, tentando próxima SKU."
               fi
             done
 
@@ -122,13 +122,14 @@ stages:
             exit 1
           fi
 
-          echo "##vso[task.setvariable variable=locationChosen]$chosenLoc"
-          echo "##vso[task.setvariable variable=vmSkuChosen]$chosenSku"
-          echo "##vso[task.setvariable variable=resourceGroupNameChosen]$chosenRg"
+          # OUTPUT variables: ficam disponíveis em outros stages via stageDependencies
+          echo "##vso[task.setvariable variable=locationChosen;isOutput=true]$chosenLoc"
+          echo "##vso[task.setvariable variable=vmSkuChosen;isOutput=true]$chosenSku"
+          echo "##vso[task.setvariable variable=resourceGroupNameChosen;isOutput=true]$chosenRg"
 
     # ---------------------------------------------------------
-    # Step 2: Executa o deploy do ARM Template
-    # Usa as variáveis escolhidas no step anterior
+    # Step 2: Executa o deploy do ARM Template no RG e região escolhidos
+    # Aqui ainda estamos no mesmo job, então conseguimos ler via $(pickRegionSku.xxx)
     # ---------------------------------------------------------
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
@@ -136,15 +137,15 @@ stages:
         deploymentScope: 'Resource Group'
         azureResourceManagerConnection: 'ar01com'
         action: 'Create Or Update Resource Group'
-        resourceGroupName: '$(resourceGroupNameChosen)'
-        location: '$(locationChosen)'
+        resourceGroupName: '$(pickRegionSku.resourceGroupNameChosen)'
+        location: '$(pickRegionSku.locationChosen)'
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
         overrideParameters: >
-          -vmSku "$(vmSkuChosen)"
+          -vmSku "$(pickRegionSku.vmSkuChosen)"
           -vmName "$(vmName)"
-          -location "$(locationChosen)"
+          -location "$(pickRegionSku.locationChosen)"
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
@@ -155,14 +156,20 @@ stages:
   displayName: 'Publicar site no IIS'
   dependsOn: DeployInfra
   condition: succeeded()
+
+  # Variáveis deste stage puxadas do output do stage anterior
+  variables:
+    locationChosen: $[ stageDependencies.DeployInfra.Deploy.outputs['pickRegionSku.locationChosen'] ]
+    vmSkuChosen: $[ stageDependencies.DeployInfra.Deploy.outputs['pickRegionSku.vmSkuChosen'] ]
+    resourceGroupNameChosen: $[ stageDependencies.DeployInfra.Deploy.outputs['pickRegionSku.resourceGroupNameChosen'] ]
+
   jobs:
   - job: PublishHTML
     displayName: 'Executar CustomScriptExtension para copiar index.html'
     steps:
 
     # ---------------------------------------------------------
-    # Executa a extensão na VM para rodar o script PowerShell
-    # Ajuste crítico: usa env vars para evitar erro de bash ao interpretar $(variavel)
+    # Executa a extensão na VM usando o RG escolhido no stage anterior
     # ---------------------------------------------------------
     - task: AzureCLI@2
       displayName: 'Executar CustomScriptExtension'
@@ -173,26 +180,22 @@ stages:
         inlineScript: |
           set -e
 
-          echo "RG: $RG_NAME"
-          echo "VM: $VM_NAME"
-          echo "Script URL: $SCRIPT_URL"
+          echo "RG escolhido: $(resourceGroupNameChosen)"
+          echo "VM: $(vmName)"
+          echo "Script URL: $(scriptUrl)"
 
           cat <<EOF > customScriptSettings.json
           {
             "fileUris": [
-              "$SCRIPT_URL"
+              "$(scriptUrl)"
             ],
             "commandToExecute": "powershell -ExecutionPolicy Bypass -File site.ps1"
           }
           EOF
 
           az vm extension set \
-            --resource-group "$RG_NAME" \
-            --vm-name "$VM_NAME" \
+            --resource-group "$(resourceGroupNameChosen)" \
+            --vm-name "$(vmName)" \
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
             --settings customScriptSettings.json
-      env:
-        RG_NAME: $(resourceGroupNameChosen)
-        VM_NAME: $(vmName)
-        SCRIPT_URL: $(scriptUrl)
