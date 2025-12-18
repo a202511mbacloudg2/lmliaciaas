@@ -10,8 +10,7 @@ variables:
   location: 'brazilsouth'
   resourceGroupName: 'rg-iac-web-iis-brs'
   vmName: 'vm-iac-web-iis'
-  templateFile: 'vm-iis-template.json'
-  parametersFile: 'vm-iis-parameters.json'
+  vmSkuFallbacks: 'Standard_B1s Standard_B2s Standard_B2ms Standard_DS1_v2'
   indexUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/index.html'
   scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
@@ -23,7 +22,7 @@ stages:
     displayName: 'Criar RG e recursos ARM'
     steps:
     - task: AzureCLI@2
-      displayName: 'Criar Resource Group'
+      displayName: 'Garantir Resource Group'
       inputs:
         azureSubscription: 'ar01com'
         scriptType: bash
@@ -41,6 +40,42 @@ stages:
             az group create --name "$(resourceGroupName)" --location "$(location)"
           fi
 
+    - task: AzureCLI@2
+      displayName: 'Selecionar SKU disponível no brazilsouth'
+      inputs:
+        azureSubscription: 'ar01com'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+
+          echo "Candidatas: $(vmSkuFallbacks)"
+          chosen=""
+
+          for sku in $(vmSkuFallbacks); do
+            echo "Testando SKU: $sku"
+
+            restrictions=$(az vm list-skus \
+              --location "$(location)" \
+              --resource-type virtualMachines \
+              --query "[?name=='$sku'] | [0].restrictions" -o json)
+
+            # Se restrictions for null ou [], consideramos disponível para a assinatura naquela região
+            if [ "$restrictions" = "null" ] || [ "$restrictions" = "[]" ]; then
+              chosen="$sku"
+              echo "SKU escolhida: $chosen"
+              break
+            fi
+          done
+
+          if [ -z "$chosen" ]; then
+            echo "Nenhuma SKU candidata está disponível em $(location)."
+            echo "Rode manualmente: az vm list-skus --location $(location) --resource-type virtualMachines -o table"
+            exit 1
+          fi
+
+          echo "##vso[task.setvariable variable=vmSkuChosen]$chosen"
+
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
       inputs:
@@ -52,6 +87,10 @@ stages:
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
+        overrideParameters: >
+          -vmSku "$(vmSkuChosen)"
+          -vmName "$(vmName)"
+          -location "$(location)"
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
