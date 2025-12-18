@@ -7,10 +7,10 @@ pool:
     - Agent.Name -equals mac-agent-pucminas-01
 
 variables:
-  location: 'brazilsouth'
-  resourceGroupName: 'rg-iac-web-iis-brs'
+  # ordem importa, o script tenta nessa sequência
+  candidateLocations: 'brazilsouth brazilseast eastus eastus2 southcentralus westus2'
+  vmSkuFallbacks: 'Standard_B1s Standard_B2s Standard_B2ms Standard_DS1_v2 Standard_D2s_v3 Standard_D2as_v5'
   vmName: 'vm-iac-web-iis'
-  vmSkuFallbacks: 'Standard_B1s Standard_B2s Standard_B2ms Standard_DS1_v2'
   indexUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/index.html'
   scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
@@ -22,26 +22,7 @@ stages:
     displayName: 'Criar RG e recursos ARM'
     steps:
     - task: AzureCLI@2
-      displayName: 'Garantir Resource Group'
-      inputs:
-        azureSubscription: 'ar01com'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          if az group show --name "$(resourceGroupName)" >/dev/null 2>&1; then
-            rgLoc=$(az group show --name "$(resourceGroupName)" --query location -o tsv)
-            echo "RG $(resourceGroupName) já existe em: $rgLoc"
-            if [ "$rgLoc" != "$(location)" ]; then
-              echo "Erro: RG existe em $rgLoc, mas pipeline está em $(location). Ajuste resourceGroupName ou location."
-              exit 1
-            fi
-          else
-            az group create --name "$(resourceGroupName)" --location "$(location)"
-          fi
-
-    - task: AzureCLI@2
-      displayName: 'Selecionar SKU disponível no brazilsouth'
+      displayName: 'Selecionar região e SKU disponíveis'
       inputs:
         azureSubscription: 'ar01com'
         scriptType: bash
@@ -49,32 +30,70 @@ stages:
         inlineScript: |
           set -e
 
-          echo "Candidatas: $(vmSkuFallbacks)"
-          chosen=""
+          echo "Regiões candidatas: $(candidateLocations)"
+          echo "SKUs candidatas: $(vmSkuFallbacks)"
 
-          for sku in $(vmSkuFallbacks); do
-            echo "Testando SKU: $sku"
+          chosenLoc=""
+          chosenSku=""
 
-            restrictions=$(az vm list-skus \
-              --location "$(location)" \
-              --resource-type virtualMachines \
-              --query "[?name=='$sku'] | [0].restrictions" -o json)
+          for loc in $(candidateLocations); do
+            echo "Testando região: $loc"
 
-            # Se restrictions for null ou [], consideramos disponível para a assinatura naquela região
-            if [ "$restrictions" = "null" ] || [ "$restrictions" = "[]" ]; then
-              chosen="$sku"
-              echo "SKU escolhida: $chosen"
+            for sku in $(vmSkuFallbacks); do
+              echo "  Testando SKU: $sku em $loc"
+
+              restrictions=$(az vm list-skus \
+                --location "$loc" \
+                --resource-type virtualMachines \
+                --query "[?name=='$sku'] | [0].restrictions" -o json)
+
+              if [ "$restrictions" = "null" ] || [ "$restrictions" = "[]" ]; then
+                chosenLoc="$loc"
+                chosenSku="$sku"
+                echo "Encontrado: location=$chosenLoc, sku=$chosenSku"
+                break
+              fi
+            done
+
+            if [ -n "$chosenLoc" ]; then
               break
             fi
           done
 
-          if [ -z "$chosen" ]; then
-            echo "Nenhuma SKU candidata está disponível em $(location)."
-            echo "Rode manualmente: az vm list-skus --location $(location) --resource-type virtualMachines -o table"
+          if [ -z "$chosenLoc" ] || [ -z "$chosenSku" ]; then
+            echo "Nenhuma combinação location+sku encontrada nas listas."
             exit 1
           fi
 
-          echo "##vso[task.setvariable variable=vmSkuChosen]$chosen"
+          echo "##vso[task.setvariable variable=locationChosen]$chosenLoc"
+          echo "##vso[task.setvariable variable=vmSkuChosen]$chosenSku"
+
+          rg="rg-iac-web-iis-$chosenLoc"
+          echo "##vso[task.setvariable variable=resourceGroupNameChosen]$rg"
+          echo "RG escolhido: $rg"
+
+    - task: AzureCLI@2
+      displayName: 'Garantir Resource Group na região escolhida'
+      inputs:
+        azureSubscription: 'ar01com'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+
+          rg="$(resourceGroupNameChosen)"
+          loc="$(locationChosen)"
+
+          if az group show --name "$rg" >/dev/null 2>&1; then
+            rgLoc=$(az group show --name "$rg" --query location -o tsv)
+            echo "RG $rg já existe em: $rgLoc"
+            if [ "$rgLoc" != "$loc" ]; then
+              echo "Erro: RG $rg existe em $rgLoc, mas foi escolhido $loc."
+              exit 1
+            fi
+          else
+            az group create --name "$rg" --location "$loc"
+          fi
 
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
@@ -82,15 +101,15 @@ stages:
         deploymentScope: 'Resource Group'
         azureResourceManagerConnection: 'ar01com'
         action: 'Create Or Update Resource Group'
-        resourceGroupName: '$(resourceGroupName)'
-        location: '$(location)'
+        resourceGroupName: '$(resourceGroupNameChosen)'
+        location: '$(locationChosen)'
         templateLocation: 'Linked artifact'
         csmFile: 'arm-templates/vm-iis-template.json'
         csmParametersFile: 'arm-templates/vm-iis-parameters.json'
         overrideParameters: >
           -vmSku "$(vmSkuChosen)"
           -vmName "$(vmName)"
-          -location "$(location)"
+          -location "$(locationChosen)"
         deploymentMode: 'Incremental'
         deploymentName: 'vm-iis-deployment'
 
@@ -119,7 +138,7 @@ stages:
           EOF
 
           az vm extension set \
-            --resource-group "$(resourceGroupName)" \
+            --resource-group "$(resourceGroupNameChosen)" \
             --vm-name "$(vmName)" \
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
