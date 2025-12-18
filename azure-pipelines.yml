@@ -2,11 +2,9 @@ trigger:
 - main
 
 pool:
-  name: agentPoolPucMinas # Nome do agent pool
+  name: agentPoolPucMinas
   demands:
-    - Agent.Name -equals mac-agent-pucminas-01  # Força o uso do agente específico
-
-  #vmImage: 'windows-latest'
+    - Agent.Name -equals mac-agent-pucminas-01
 
 variables:
   location: 'westus3'
@@ -15,7 +13,7 @@ variables:
   templateFile: 'vm-iis-template.json'
   parametersFile: 'vm-iis-parameters.json'
   indexUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/index.html'
-  scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1' # Verifique se esta URL está correta
+  scriptUrl: 'https://raw.githubusercontent.com/lmlpuc/lmlarm003/refs/heads/main/src/scripts/site.ps1'
 
 stages:
 - stage: DeployInfra
@@ -27,17 +25,17 @@ stages:
     - task: AzureCLI@2
       displayName: 'Criar Resource Group'
       inputs:
-        azureSubscription: 'ar01com'  # 🔁 Substitua
-        scriptType: 'ps'
-        scriptLocation: 'inlineScript'
+        azureSubscription: 'ar01com'
+        scriptType: bash
+        scriptLocation: inlineScript
         inlineScript: |
-          az group create --name $(resourceGroupName) --location $(location)
+          az group create --name "$(resourceGroupName)" --location "$(location)"
 
     - task: AzureResourceManagerTemplateDeployment@3
       displayName: 'Deploy ARM Template'
       inputs:
         deploymentScope: 'Resource Group'
-        azureResourceManagerConnection: 'ar01com'  # 🔁 Substitua
+        azureResourceManagerConnection: 'ar01com'
         action: 'Create Or Update Resource Group'
         resourceGroupName: '$(resourceGroupName)'
         location: '$(location)'
@@ -58,8 +56,8 @@ stages:
       displayName: 'Executar CustomScriptExtension'
       inputs:
         azureSubscription: 'ar01com'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
+        scriptType: bash
+        scriptLocation: inlineScript
         inlineScript: |
           cat <<EOF > customScriptSettings.json
           {
@@ -76,4 +74,3 @@ stages:
             --name CustomScriptExtension \
             --publisher Microsoft.Compute \
             --settings customScriptSettings.json
-  # fim
