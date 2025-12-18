@@ -3,13 +3,13 @@
     "contentVersion": "1.0.0.0",
     "parameters": {
         "resourceGroupName": {
-            "value": "rg-iac-web-iis"
+            "value": "rg-iac-web-iis-brs"
         },
         "vmName": {
             "value": "vm-iac-web-iis"
         },
         "location": {
-            "value": "WestUS3"
+            "value": "brazilsouth"
         },
         "adminUsername": {
             "value": "iacadmin"
