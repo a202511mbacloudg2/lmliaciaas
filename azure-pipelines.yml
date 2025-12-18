@@ -7,7 +7,7 @@ pool:
     - Agent.Name -equals mac-agent-pucminas-01
 
 variables:
-  location: 'westus3'
+  location: 'brazilsouth'
   resourceGroupName: 'rg-iac-web-iis'
   vmName: 'vm-iac-web-iis'
   templateFile: 'vm-iis-template.json'
